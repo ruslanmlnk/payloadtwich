@@ -130,7 +130,8 @@ const buildFilterGraph = (durations: number[], xfade: number, opts: { useXfade: 
   const audioTotal = sumDur - (opts.useAcrossfade ? xfade * (count - 1) : 0)
   const totalDuration = Math.min(videoTotal, audioTotal)
 
-  const parts = [...videoParts, ...audioOps, ...videoOps, ...audioParts].filter(Boolean)
+  // Order matters: define parts first, then ops that reference them.
+  const parts = [...videoParts, ...audioParts, ...videoOps, ...audioOps].filter(Boolean)
 
   return {
     filter: parts.join(';'),
@@ -170,7 +171,7 @@ const runStream = async (opts: StartOptions, preferXfade: boolean, attemptedFall
   const hasXfadeFilter = FORCE_XFADE || hasFilter('xfade')
   const hasAcrossfadeFilter = FORCE_ACROSSFADE || hasFilter('acrossfade')
   const useXfade = preferXfade && hasXfadeFilter
-  const useAcrossfade = hasAcrossfadeFilter
+  const useAcrossfade = preferXfade ? hasAcrossfadeFilter : hasAcrossfadeFilter && !attemptedFallback
 
   let filterGraph: string
   let vLabel: string
@@ -249,8 +250,11 @@ const runStream = async (opts: StartOptions, preferXfade: boolean, attemptedFall
       if (useXfade && !attemptedFallback) {
         console.warn('[stream] retrying without xfade due to ffmpeg failure')
         setTimeout(() => runStream(opts, false, true), 300)
+      } else if (useAcrossfade && !attemptedFallback) {
+        console.warn('[stream] retrying without audio crossfade due to ffmpeg failure')
+        setTimeout(() => runStream(opts, false, true), 300)
       } else {
-        console.warn('[stream] restart after failure (xfade off)')
+        console.warn('[stream] restart after failure (xfade/crossfade off)')
         setTimeout(() => runStream(opts, false, true), 500)
       }
     } else {
