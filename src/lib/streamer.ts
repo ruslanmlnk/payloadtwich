@@ -41,6 +41,7 @@ const state: StreamState = {
 const filterCache = new Map<string, boolean>()
 const sanitizedTrackCache = new Map<string, { tmpPath: string; cacheKey: string }>()
 const remuxTrackCache = new Map<string, { tmpPath: string; cacheKey: string }>()
+const concatAudioCache = new Map<string, { tmpPath: string; cacheKey: string }>()
 
 const buildCacheKey = (stats: fs.Stats) => `${stats.mtimeMs}-${stats.size}`
 
@@ -169,6 +170,57 @@ const prepareTrack = async (trackPath: string) => {
   }
 }
 
+const concatAudio = async (paths: string[]): Promise<string> => {
+  // Use paths as cache key; order matters.
+  const key = paths.join('|')
+  const cached = concatAudioCache.get(key)
+  if (cached?.tmpPath && fs.existsSync(cached.tmpPath)) {
+    return cached.tmpPath
+  }
+
+  const listPath = path.join(os.tmpdir(), `stream-audio-list-${crypto.randomBytes(6).toString('hex')}.txt`)
+  const tmpOut = path.join(os.tmpdir(), `stream-audio-${crypto.randomBytes(6).toString('hex')}.wav`)
+
+  const listContent = paths.map((p) => `file '${p.replace(/'/g, "'\\''")}'`).join('\n')
+  await fs.promises.writeFile(listPath, listContent)
+
+  const res = spawnSync(FFMPEG_BIN, [
+    '-v',
+    'error',
+    '-y',
+    '-safe',
+    '0',
+    '-f',
+    'concat',
+    '-i',
+    listPath,
+    '-map_metadata',
+    '-1',
+    '-map_chapters',
+    '-1',
+    '-c:a',
+    'pcm_s16le',
+    '-ar',
+    `${AUDIO_SR}`,
+    '-ac',
+    '2',
+    tmpOut,
+  ])
+
+  if (res.error || (typeof res.status === 'number' && res.status !== 0)) {
+    console.warn('[stream] audio concat failed; using first track only', {
+      error: res.error,
+      status: res.status,
+      stderr: (res.stderr || '').toString(),
+    })
+    concatAudioCache.delete(key)
+    return paths[0]
+  }
+
+  concatAudioCache.set(key, { tmpPath: tmpOut, cacheKey: key })
+  return tmpOut
+}
+
 const hasFilter = (name: string): boolean => {
   if (filterCache.has(name)) return filterCache.get(name) as boolean
 
@@ -295,6 +347,126 @@ export const startStream = async (opts: { backgroundPaths: string[]; tracks: str
   return runStream(opts, true, false)
 }
 
+const runStreamSimple = async (opts: StartOptions, preparedTracks: { path: string; sanitized: boolean; remuxed: boolean }[]) => {
+  if (!preparedTracks.length) {
+    return { ok: false, message: 'No tracks to stream' }
+  }
+
+  const audioPath = await concatAudio(preparedTracks.map((t) => t.path))
+  const background = opts.backgroundPaths[0]
+
+  stopStream()
+
+  const args: string[] = [
+    '-re',
+    '-hide_banner',
+    '-loglevel',
+    'warning',
+    '-fflags',
+    '+discardcorrupt',
+    '-ignore_unknown',
+    '-err_detect',
+    'ignore_err',
+    '-loop',
+    '1',
+    '-i',
+    background,
+    '-i',
+    audioPath,
+    '-map',
+    '0:v',
+    '-map',
+    '1:a',
+    '-shortest',
+    '-c:v',
+    'libx264',
+    '-preset',
+    'veryfast',
+    '-tune',
+    'stillimage',
+    '-pix_fmt',
+    'yuv420p',
+    '-b:v',
+    '2500k',
+    '-maxrate',
+    '2500k',
+    '-bufsize',
+    '5000k',
+    '-c:a',
+    'aac',
+    '-b:a',
+    '160k',
+    '-ar',
+    `${AUDIO_SR}`,
+    '-ac',
+    '2',
+    '-threads',
+    '1',
+    '-f',
+    'flv',
+    opts.streamUrl,
+  ]
+
+  const proc = spawn(FFMPEG_BIN, args, { stdio: 'inherit' })
+  state.process = proc
+  state.running = true
+
+  proc.on('close', (code, signal) => {
+    console.log('[stream] ffmpeg (simple) exited', { code, signal })
+    const wasRunning = state.running
+    state.running = false
+    state.process = null
+    if (code === 0) {
+      state.consecutiveFailures = 0
+      state.lastFailureAt = 0
+    }
+
+    if (!wasRunning) return
+
+    if (signal || (typeof code === 'number' && code !== 0)) {
+      const now = Date.now()
+      if (now - state.lastFailureAt > FAILURE_RESET_MS) {
+        state.consecutiveFailures = 0
+      }
+      state.consecutiveFailures += 1
+      state.lastFailureAt = now
+
+      if (state.consecutiveFailures >= MAX_CONSECUTIVE_FAILURES) {
+        console.error('[stream] ffmpeg failed repeatedly (simple), giving up until next manual start')
+        state.lastOpts = null
+        return
+      }
+
+      console.warn('[stream] restart simple pipeline after failure')
+      setTimeout(() => runStreamSimple(opts, preparedTracks), 500)
+    } else {
+      setTimeout(() => runStreamSimple(opts, preparedTracks), 200)
+    }
+  })
+
+  proc.on('error', (err) => {
+    console.error('[stream] ffmpeg error (simple)', err)
+    stopStream()
+  })
+
+  console.log(
+    '[stream] started ffmpeg (simple)',
+    JSON.stringify({
+      ffmpegPath: FFMPEG_BIN,
+      tracks: preparedTracks.length,
+      backgrounds: 1,
+      sanitizedTracks: preparedTracks.some((t) => t.sanitized),
+      remuxedTracks: preparedTracks.some((t) => t.remuxed),
+      simple: true,
+    }),
+  )
+
+  return {
+    ok: true,
+    message: 'Stream started (simple pipeline: single background, concatenated audio)',
+  }
+}
+
 const runStream = async (opts: StartOptions, preferXfade: boolean, attemptedFallback: boolean) => {
   const tracks = opts.tracks
   const backgroundsForTracks = tracks.map((_, idx) => opts.backgroundPaths[idx % opts.backgroundPaths.length])
@@ -383,6 +555,8 @@ const runStream = async (opts: StartOptions, preferXfade: boolean, attemptedFall
     `${AUDIO_SR}`,
     '-ac',
     '2',
+    '-threads',
+    '1',
     '-f',
     'flv',
     opts.streamUrl,
@@ -424,6 +598,9 @@ const runStream = async (opts: StartOptions, preferXfade: boolean, attemptedFall
       } else if (useAcrossfade && !attemptedFallback) {
         console.warn('[stream] retrying without audio crossfade due to ffmpeg failure')
         setTimeout(() => runStream(opts, false, true), 300)
+      } else if (!attemptedFallback) {
+        console.warn('[stream] retrying with simple concat pipeline')
+        setTimeout(() => runStreamSimple(opts, preparedTracks), 300)
       } else {
         console.warn('[stream] restart after failure (xfade/crossfade off)')
         setTimeout(() => runStream(opts, false, true), 500)
