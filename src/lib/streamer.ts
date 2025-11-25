@@ -22,6 +22,7 @@ const FFMPEG_BIN = process.env.FFMPEG_PATH || 'ffmpeg'
 const FFPROBE_BIN = process.env.FFPROBE_PATH || 'ffprobe'
 const FORCE_XFADE = process.env.FORCE_XFADE === 'true'
 const FORCE_ACROSSFADE = process.env.FORCE_ACROSSFADE === 'true'
+const REMUX_TRACKS = process.env.REMUX_TRACKS !== 'false'
 
 const FPS = Number(process.env.STREAM_FPS || 30)
 const AUDIO_SR = 44100
@@ -39,6 +40,7 @@ const state: StreamState = {
 
 const filterCache = new Map<string, boolean>()
 const sanitizedTrackCache = new Map<string, { tmpPath: string; cacheKey: string }>()
+const remuxTrackCache = new Map<string, { tmpPath: string; cacheKey: string }>()
 
 const buildCacheKey = (stats: fs.Stats) => `${stats.mtimeMs}-${stats.size}`
 
@@ -102,6 +104,68 @@ const sanitizeTrack = async (trackPath: string): Promise<string> => {
   } catch (error) {
     console.warn('[stream] failed to sanitize track; using original', { trackPath, error })
     return trackPath
+  }
+}
+
+const remuxTrack = async (trackPath: string): Promise<string> => {
+  if (!REMUX_TRACKS) return trackPath
+
+  try {
+    const stats = await fs.promises.stat(trackPath)
+    const cacheKey = buildCacheKey(stats)
+    const cached = remuxTrackCache.get(trackPath)
+    if (cached?.cacheKey === cacheKey && fs.existsSync(cached.tmpPath)) {
+      return cached.tmpPath
+    }
+
+    const tmpPath = path.join(os.tmpdir(), `stream-track-remux-${crypto.randomBytes(6).toString('hex')}.wav`)
+    const res = spawnSync(FFMPEG_BIN, [
+      '-v',
+      'error',
+      '-y',
+      '-i',
+      trackPath,
+      '-vn',
+      '-sn',
+      '-dn',
+      '-map_metadata',
+      '-1',
+      '-map_chapters',
+      '-1',
+      '-c:a',
+      'pcm_s16le',
+      '-ar',
+      `${AUDIO_SR}`,
+      '-ac',
+      '2',
+      tmpPath,
+    ])
+
+    if (res.error || (typeof res.status === 'number' && res.status !== 0)) {
+      console.warn('[stream] remux failed; using sanitized track', {
+        trackPath,
+        error: res.error,
+        status: res.status,
+        stderr: (res.stderr || '').toString(),
+      })
+      return trackPath
+    }
+
+    remuxTrackCache.set(trackPath, { tmpPath, cacheKey })
+    return tmpPath
+  } catch (error) {
+    console.warn('[stream] remux threw; using sanitized track', { trackPath, error })
+    return trackPath
+  }
+}
+
+const prepareTrack = async (trackPath: string) => {
+  const sanitizedPath = await sanitizeTrack(trackPath)
+  const remuxedPath = await remuxTrack(sanitizedPath)
+  return {
+    path: remuxedPath,
+    sanitized: sanitizedPath !== trackPath,
+    remuxed: remuxedPath !== sanitizedPath,
   }
 }
 
@@ -235,13 +299,15 @@ const runStream = async (opts: StartOptions, preferXfade: boolean, attemptedFall
   const tracks = opts.tracks
   const backgroundsForTracks = tracks.map((_, idx) => opts.backgroundPaths[idx % opts.backgroundPaths.length])
 
-  let inputTracks: string[]
+  let preparedTracks: { path: string; sanitized: boolean; remuxed: boolean }[]
   try {
-    inputTracks = await Promise.all(tracks.map((track) => sanitizeTrack(track)))
+    preparedTracks = await Promise.all(tracks.map((track) => prepareTrack(track)))
   } catch (error) {
     const message = error instanceof Error ? error.message : 'Failed to prepare tracks'
     return { ok: false, message }
   }
+
+  const inputTracks = preparedTracks.map((t) => t.path)
 
   let durations: number[]
   try {
@@ -277,6 +343,8 @@ const runStream = async (opts: StartOptions, preferXfade: boolean, attemptedFall
   stopStream()
 
   const args: string[] = ['-re', '-hide_banner', '-loglevel', 'warning']
+
+  args.push('-fflags', '+discardcorrupt', '-ignore_unknown', '-err_detect', 'ignore_err')
 
   for (const bg of backgroundsForTracks) {
     args.push('-loop', '1', '-i', bg)
@@ -381,7 +449,8 @@ const runStream = async (opts: StartOptions, preferXfade: boolean, attemptedFall
       useXfade,
       useAcrossfade,
       duration: totalDuration.toFixed(2),
-      sanitizedTracks: inputTracks.some((t, idx) => t !== tracks[idx]),
+      sanitizedTracks: preparedTracks.some((t) => t.sanitized),
+      remuxedTracks: preparedTracks.some((t) => t.remuxed),
     }),
   )
 
