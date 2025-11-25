@@ -7,6 +7,8 @@ type StreamState = {
 
 const FFMPEG_BIN = process.env.FFMPEG_PATH || 'ffmpeg'
 const FFPROBE_BIN = process.env.FFPROBE_PATH || 'ffprobe'
+const FORCE_XFADE = process.env.FORCE_XFADE === 'true'
+const FORCE_ACROSSFADE = process.env.FORCE_ACROSSFADE === 'true'
 
 const FPS = Number(process.env.STREAM_FPS || 30)
 const AUDIO_SR = 44100
@@ -160,8 +162,8 @@ export const startStream = async (opts: { backgroundPaths: string[]; tracks: str
   const minDur = Math.min(...durations)
   const xfade = Math.min(DEFAULT_XFADE, Math.max(0.2, minDur / 2))
 
-  const useXfade = hasFilter('xfade')
-  const useAcrossfade = hasFilter('acrossfade')
+  const useXfade = FORCE_XFADE || hasFilter('xfade')
+  const useAcrossfade = FORCE_ACROSSFADE || hasFilter('acrossfade')
 
   let filterGraph: string
   let totalDuration: number
@@ -240,6 +242,7 @@ export const startStream = async (opts: { backgroundPaths: string[]; tracks: str
   console.log(
     '[stream] started ffmpeg',
     JSON.stringify({
+      ffmpegPath: FFMPEG_BIN,
       tracks: tracks.length,
       backgrounds: backgroundsForTracks.length,
       xfade,
