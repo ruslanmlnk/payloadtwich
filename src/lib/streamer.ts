@@ -3,6 +3,7 @@ import { spawn, spawnSync, type ChildProcess } from 'child_process'
 type StreamState = {
   process: ChildProcess | null
   running: boolean
+  lastOpts: StartOptions | null
 }
 
 type StartOptions = {
@@ -23,6 +24,7 @@ const DEFAULT_XFADE = Number(process.env.STREAM_XFADE_SEC || 2)
 const state: StreamState = {
   process: null,
   running: false,
+  lastOpts: null,
 }
 
 const filterCache = new Map<string, boolean>()
@@ -67,9 +69,9 @@ const buildFilterGraph = (durations: number[], xfade: number, opts: { useXfade: 
 
   const videoParts: string[] = []
   const audioParts: string[] = []
+  const videoOps: string[] = []
+  const audioOps: string[] = []
 
-  // Inputs are ordered: backgrounds per track first, then audio tracks.
-  // background index = i, audio index = count + i
   for (let i = 0; i < count; i++) {
     const dur = durations[i]
     videoParts.push(
@@ -81,9 +83,6 @@ const buildFilterGraph = (durations: number[], xfade: number, opts: { useXfade: 
       `[${count + i}:a]atrim=duration=${dur.toFixed(3)},asetpts=PTS-STARTPTS[a${i}]`,
     )
   }
-
-  const videoOps: string[] = []
-  const audioOps: string[] = []
 
   let vPrev = 'v0'
   let aPrev = 'a0'
@@ -114,9 +113,7 @@ const buildFilterGraph = (durations: number[], xfade: number, opts: { useXfade: 
       offset = durations[0] - xfade
       for (let i = 1; i < count; i++) {
         const aOut = i === count - 1 ? 'amerge' : `axf${i}`
-        audioOps.push(
-          `[${aPrev}][a${i}]acrossfade=d=${xfade.toFixed(3)}:c1=tri:c2=tri[${aOut}]`,
-        )
+        audioOps.push(`[${aPrev}][a${i}]acrossfade=d=${xfade.toFixed(3)}:c1=tri:c2=tri[${aOut}]`)
         aPrev = aOut
         offset += durations[i] - xfade
       }
@@ -132,16 +129,13 @@ const buildFilterGraph = (durations: number[], xfade: number, opts: { useXfade: 
   const videoTotal = sumDur - (opts.useXfade ? xfade * (count - 1) : 0)
   const audioTotal = sumDur - (opts.useAcrossfade ? xfade * (count - 1) : 0)
   const totalDuration = Math.min(videoTotal, audioTotal)
-  const totalFrames = Math.max(1, Math.ceil(totalDuration * FPS))
-  const totalSamples = Math.max(1, Math.ceil(totalDuration * AUDIO_SR))
 
-  const loopVideo = `[${vPrev}]format=yuv420p,loop=loop=-1:size=${totalFrames}:start=0,setpts=N/FRAME_RATE/TB[vout]`
-  const loopAudio = `[${aPrev}]aloop=loop=-1:size=${totalSamples}:start=0,asetpts=N/${AUDIO_SR}/TB[aout]`
-
-  const parts = [...videoParts, ...audioParts, ...videoOps, ...audioOps, loopVideo, loopAudio].filter(Boolean)
+  const parts = [...videoParts, ...audioOps, ...videoOps, ...audioParts].filter(Boolean)
 
   return {
     filter: parts.join(';'),
+    vLabel: vPrev,
+    aLabel: aPrev,
     totalDuration,
   }
 }
@@ -154,6 +148,7 @@ export const startStream = async (opts: { backgroundPaths: string[]; tracks: str
     return { ok: false, message: 'No backgrounds provided' }
   }
 
+  state.lastOpts = opts
   return runStream(opts, true, false)
 }
 
@@ -178,10 +173,14 @@ const runStream = async (opts: StartOptions, preferXfade: boolean, attemptedFall
   const useAcrossfade = hasAcrossfadeFilter
 
   let filterGraph: string
+  let vLabel: string
+  let aLabel: string
   let totalDuration: number
   try {
     const built = buildFilterGraph(durations, xfade, { useXfade, useAcrossfade })
     filterGraph = built.filter
+    vLabel = built.vLabel
+    aLabel = built.aLabel
     totalDuration = built.totalDuration
   } catch (error) {
     const message = error instanceof Error ? error.message : 'Failed to build filter graph'
@@ -192,12 +191,10 @@ const runStream = async (opts: StartOptions, preferXfade: boolean, attemptedFall
 
   const args: string[] = ['-re', '-hide_banner', '-loglevel', 'warning']
 
-  // Background inputs (per track for easy pairing)
   for (const bg of backgroundsForTracks) {
     args.push('-loop', '1', '-i', bg)
   }
 
-  // Audio inputs
   for (const track of tracks) {
     args.push('-i', track)
   }
@@ -206,9 +203,9 @@ const runStream = async (opts: StartOptions, preferXfade: boolean, attemptedFall
     '-filter_complex',
     filterGraph,
     '-map',
-    '[vout]',
+    `[${vLabel}]`,
     '-map',
-    '[aout]',
+    `[${aLabel}]`,
     '-c:v',
     'libx264',
     '-preset',
@@ -242,13 +239,23 @@ const runStream = async (opts: StartOptions, preferXfade: boolean, attemptedFall
 
   proc.on('close', (code, signal) => {
     console.log('[stream] ffmpeg exited', { code, signal })
+    const wasRunning = state.running
     state.running = false
     state.process = null
 
-    // If we tried xfade and ffmpeg failed (non-zero exit or signal), retry once without xfade to keep stream alive
-    if (useXfade && !attemptedFallback && (signal || (typeof code === 'number' && code !== 0))) {
-      console.warn('[stream] retrying without xfade due to ffmpeg failure')
-      runStream(opts, false, true)
+    if (!wasRunning) return
+
+    if (signal || (typeof code === 'number' && code !== 0)) {
+      if (useXfade && !attemptedFallback) {
+        console.warn('[stream] retrying without xfade due to ffmpeg failure')
+        setTimeout(() => runStream(opts, false, true), 300)
+      } else {
+        console.warn('[stream] restart after failure (xfade off)')
+        setTimeout(() => runStream(opts, false, true), 500)
+      }
+    } else {
+      // completed playlist, restart to loop
+      setTimeout(() => runStream(opts, preferXfade, attemptedFallback), 200)
     }
   })
 
@@ -277,6 +284,7 @@ const runStream = async (opts: StartOptions, preferXfade: boolean, attemptedFall
 }
 
 export const stopStream = () => {
+  const wasRunning = state.running
   state.running = false
 
   if (state.process) {
@@ -288,6 +296,9 @@ export const stopStream = () => {
   }
 
   state.process = null
+  if (wasRunning) {
+    state.lastOpts = null
+  }
 }
 
 export const isStreaming = () => state.running
