@@ -56,6 +56,25 @@ const hasId3v1Tag = (buf: Buffer) => {
   return buf[start] === 0x54 && buf[start + 1] === 0x41 && buf[start + 2] === 0x47
 }
 
+const firstMp3FrameOffset = (buf: Buffer) => {
+  for (let i = 0; i < buf.length - 1; i++) {
+    if (buf[i] === 0xff && (buf[i + 1] & 0xe0) === 0xe0) {
+      return i
+    }
+  }
+  return 0
+}
+
+const apeTailOffset = (buf: Buffer) => {
+  const sig = Buffer.from('APETAGEX')
+  const idx = buf.lastIndexOf(sig)
+  // Only treat it as an APE footer if it sits near the end of the file.
+  if (idx !== -1 && idx >= buf.length - 256) {
+    return idx
+  }
+  return buf.length
+}
+
 const sanitizeTrack = async (trackPath: string): Promise<string> => {
   try {
     const stats = await fs.promises.stat(trackPath)
@@ -66,13 +85,13 @@ const sanitizeTrack = async (trackPath: string): Promise<string> => {
     }
 
     const data = await fs.promises.readFile(trackPath)
-    const stripFrom = Math.min(id3v2Size(data), data.length)
-    const stripTo = hasId3v1Tag(data) ? data.length - 128 : data.length
+    const stripFrom = Math.max(id3v2Size(data), firstMp3FrameOffset(data))
+    const stripTo = Math.min(hasId3v1Tag(data) ? data.length - 128 : data.length, apeTailOffset(data))
 
     if (stripFrom === 0 && stripTo === data.length) {
       return trackPath
     }
-    if (stripTo <= stripFrom) {
+    if (stripTo <= stripFrom || stripTo - stripFrom < 1024) {
       return trackPath
     }
 
