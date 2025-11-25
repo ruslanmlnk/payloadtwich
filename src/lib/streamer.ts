@@ -1,9 +1,15 @@
+import crypto from 'crypto'
+import fs from 'fs'
+import os from 'os'
+import path from 'path'
 import { spawn, spawnSync, type ChildProcess } from 'child_process'
 
 type StreamState = {
   process: ChildProcess | null
   running: boolean
   lastOpts: StartOptions | null
+  consecutiveFailures: number
+  lastFailureAt: number
 }
 
 type StartOptions = {
@@ -20,14 +26,65 @@ const FORCE_ACROSSFADE = process.env.FORCE_ACROSSFADE === 'true'
 const FPS = Number(process.env.STREAM_FPS || 30)
 const AUDIO_SR = 44100
 const DEFAULT_XFADE = Number(process.env.STREAM_XFADE_SEC || 2)
+const FAILURE_RESET_MS = 30_000
+const MAX_CONSECUTIVE_FAILURES = 3
 
 const state: StreamState = {
   process: null,
   running: false,
   lastOpts: null,
+  consecutiveFailures: 0,
+  lastFailureAt: 0,
 }
 
 const filterCache = new Map<string, boolean>()
+const sanitizedTrackCache = new Map<string, { tmpPath: string; cacheKey: string }>()
+
+const buildCacheKey = (stats: fs.Stats) => `${stats.mtimeMs}-${stats.size}`
+
+const id3v2Size = (buf: Buffer) => {
+  if (buf.length < 10) return 0
+  if (buf[0] !== 0x49 || buf[1] !== 0x44 || buf[2] !== 0x33) return 0
+
+  const size = (buf[6] << 21) | (buf[7] << 14) | (buf[8] << 7) | buf[9]
+  return 10 + size
+}
+
+const hasId3v1Tag = (buf: Buffer) => {
+  if (buf.length < 128) return false
+  const start = buf.length - 128
+  return buf[start] === 0x54 && buf[start + 1] === 0x41 && buf[start + 2] === 0x47
+}
+
+const sanitizeTrack = async (trackPath: string): Promise<string> => {
+  try {
+    const stats = await fs.promises.stat(trackPath)
+    const cacheKey = buildCacheKey(stats)
+    const cached = sanitizedTrackCache.get(trackPath)
+    if (cached?.cacheKey === cacheKey && fs.existsSync(cached.tmpPath)) {
+      return cached.tmpPath
+    }
+
+    const data = await fs.promises.readFile(trackPath)
+    const stripFrom = Math.min(id3v2Size(data), data.length)
+    const stripTo = hasId3v1Tag(data) ? data.length - 128 : data.length
+
+    if (stripFrom === 0 && stripTo === data.length) {
+      return trackPath
+    }
+    if (stripTo <= stripFrom) {
+      return trackPath
+    }
+
+    const tmpPath = path.join(os.tmpdir(), `stream-track-${crypto.randomBytes(6).toString('hex')}.mp3`)
+    await fs.promises.writeFile(tmpPath, data.subarray(stripFrom, stripTo))
+    sanitizedTrackCache.set(trackPath, { tmpPath, cacheKey })
+    return tmpPath
+  } catch (error) {
+    console.warn('[stream] failed to sanitize track; using original', { trackPath, error })
+    return trackPath
+  }
+}
 
 const hasFilter = (name: string): boolean => {
   if (filterCache.has(name)) return filterCache.get(name) as boolean
@@ -75,12 +132,14 @@ const buildFilterGraph = (durations: number[], xfade: number, opts: { useXfade: 
   for (let i = 0; i < count; i++) {
     const dur = durations[i]
     videoParts.push(
-      `[${i}:v]format=rgb24,scale=1280:720:force_original_aspect_ratio=decrease:in_range=pc:out_range=tv,pad=1280:720:(ow-iw)/2:(oh-ih)/2:color=black,setsar=1,format=yuv420p,trim=duration=${dur.toFixed(
+      `[${i}:v]format=rgb24,scale=1280:720:force_original_aspect_ratio=decrease:in_range=pc:out_range=tv,pad=1280:720:(ow-iw)/2:(oh-ih)/2:color=black,fps=${FPS},setsar=1,format=yuv420p,trim=duration=${dur.toFixed(
         3,
       )},setpts=PTS-STARTPTS[v${i}]`,
     )
     audioParts.push(
-      `[${count + i}:a]atrim=duration=${dur.toFixed(3)},asetpts=PTS-STARTPTS[a${i}]`,
+      `[${count + i}:a]atrim=duration=${dur.toFixed(
+        3,
+      )},asetpts=PTS-STARTPTS,aresample=${AUDIO_SR}:async=1:first_pts=0,aformat=sample_rates=${AUDIO_SR}:channel_layouts=stereo[a${i}]`,
     )
   }
 
@@ -157,9 +216,17 @@ const runStream = async (opts: StartOptions, preferXfade: boolean, attemptedFall
   const tracks = opts.tracks
   const backgroundsForTracks = tracks.map((_, idx) => opts.backgroundPaths[idx % opts.backgroundPaths.length])
 
+  let inputTracks: string[]
+  try {
+    inputTracks = await Promise.all(tracks.map((track) => sanitizeTrack(track)))
+  } catch (error) {
+    const message = error instanceof Error ? error.message : 'Failed to prepare tracks'
+    return { ok: false, message }
+  }
+
   let durations: number[]
   try {
-    durations = tracks.map((t) => probeDuration(t))
+    durations = inputTracks.map((t) => probeDuration(t))
   } catch (error) {
     const message = error instanceof Error ? error.message : 'Failed to read durations'
     return { ok: false, message }
@@ -196,7 +263,7 @@ const runStream = async (opts: StartOptions, preferXfade: boolean, attemptedFall
     args.push('-loop', '1', '-i', bg)
   }
 
-  for (const track of tracks) {
+  for (const track of inputTracks) {
     args.push('-i', track)
   }
 
@@ -243,10 +310,27 @@ const runStream = async (opts: StartOptions, preferXfade: boolean, attemptedFall
     const wasRunning = state.running
     state.running = false
     state.process = null
+    if (code === 0) {
+      state.consecutiveFailures = 0
+      state.lastFailureAt = 0
+    }
 
     if (!wasRunning) return
 
     if (signal || (typeof code === 'number' && code !== 0)) {
+      const now = Date.now()
+      if (now - state.lastFailureAt > FAILURE_RESET_MS) {
+        state.consecutiveFailures = 0
+      }
+      state.consecutiveFailures += 1
+      state.lastFailureAt = now
+
+      if (state.consecutiveFailures >= MAX_CONSECUTIVE_FAILURES) {
+        console.error('[stream] ffmpeg failed repeatedly, giving up until next manual start')
+        state.lastOpts = null
+        return
+      }
+
       if (useXfade && !attemptedFallback) {
         console.warn('[stream] retrying without xfade due to ffmpeg failure')
         setTimeout(() => runStream(opts, false, true), 300)
@@ -278,6 +362,7 @@ const runStream = async (opts: StartOptions, preferXfade: boolean, attemptedFall
       useXfade,
       useAcrossfade,
       duration: totalDuration.toFixed(2),
+      sanitizedTracks: inputTracks.some((t, idx) => t !== tracks[idx]),
     }),
   )
 
@@ -290,6 +375,8 @@ const runStream = async (opts: StartOptions, preferXfade: boolean, attemptedFall
 export const stopStream = () => {
   const wasRunning = state.running
   state.running = false
+  state.consecutiveFailures = 0
+  state.lastFailureAt = 0
 
   if (state.process) {
     try {
