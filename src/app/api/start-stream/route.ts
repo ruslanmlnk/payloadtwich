@@ -4,6 +4,7 @@ import fs from 'fs'
 import path from 'path'
 import { NextResponse } from 'next/server'
 import { getPayload } from 'payload'
+import { sql } from 'drizzle-orm'
 
 import payloadConfig from '@/payload.config'
 import type { Media, StreamDatum } from '@/payload-types'
@@ -27,6 +28,16 @@ const resolveMediaPath = (media: Media | number | null | undefined) => {
 export async function POST() {
   try {
     const payload = await getPayload({ config: payloadConfig })
+
+    // Ensure new duration column exists (idempotent, no-op if already present).
+    try {
+      await payload.db.drizzle.execute(
+        sql`alter table "stream_data_backgrounds" add column if not exists "duration" numeric`,
+      )
+    } catch (err) {
+      console.warn('[stream] failed to ensure duration column; continuing', err)
+    }
+
     const streamData = (await payload.findGlobal({ slug: 'stream-data', depth: 2 })) as StreamDatum
 
     const backgrounds =
