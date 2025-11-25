@@ -29,14 +29,19 @@ export async function POST() {
     const payload = await getPayload({ config: payloadConfig })
     const streamData = (await payload.findGlobal({ slug: 'stream-data', depth: 2 })) as StreamDatum
 
-    const backgroundPaths =
+    const backgrounds =
       streamData.backgrounds
-        ?.map((item) => (item?.image && typeof item.image === 'object' ? resolveMediaPath(item.image as Media) : null))
-        .filter((val): val is string => Boolean(val)) || []
+        ?.map((item) => {
+          const path = item?.image && typeof item.image === 'object' ? resolveMediaPath(item.image as Media) : null
+          const duration = Number(item?.duration) || 0
+          if (!path || duration <= 0) return null
+          return { path, duration }
+        })
+        .filter((val): val is { path: string; duration: number } => Boolean(val)) || []
 
-    if (!backgroundPaths.length) {
+    if (!backgrounds.length) {
       return NextResponse.json(
-        { message: 'Background image not found on disk (backgrounds -> image).' },
+        { message: 'Background not found on disk or duration missing (backgrounds -> image + duration).' },
         { status: 400 },
       )
     }
@@ -60,7 +65,7 @@ export async function POST() {
     }
 
     const result = await startStream({
-      backgroundPaths,
+      backgrounds,
       streamUrl,
       tracks,
     })
@@ -73,7 +78,7 @@ export async function POST() {
       message: result.message,
       streamUrl,
       tracks: tracks.length,
-      backgrounds: backgroundPaths.length,
+      backgrounds: backgrounds.length,
     })
   } catch (error) {
     console.error('[stream] failed to start stream', error)

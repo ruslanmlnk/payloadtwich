@@ -17,15 +17,18 @@ export const StreamData: GlobalConfig = {
       fields: [
         {
           name: 'image',
-          label: 'Image',
+          label: 'Image / GIF / Video',
           type: 'upload',
           relationTo: 'media',
           required: true,
-          filterOptions: {
-            mimeType: {
-              contains: 'image',
-            },
-          },
+        },
+        {
+          name: 'duration',
+          label: 'Duration (seconds)',
+          type: 'number',
+          required: true,
+          min: 1,
+          defaultValue: 300,
         },
       ],
     },

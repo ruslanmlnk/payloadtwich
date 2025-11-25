@@ -13,7 +13,7 @@ type StreamState = {
 }
 
 type StartOptions = {
-  backgroundPaths: string[]
+  backgrounds: { path: string; duration: number }[]
   tracks: string[]
   streamUrl: string
 }
@@ -203,60 +203,65 @@ const probeDuration = (file: string): number => {
   return dur
 }
 
-const buildFilterGraph = (
-  durations: number[],
-  xfade: number,
-  opts: { useXfade: boolean; useAcrossfade: boolean; loopOutput?: boolean },
-) => {
+const buildBackgroundGraph = (durations: number[]) => {
   const count = durations.length
-  if (!count) throw new Error('No durations to build filter graph')
+  if (!count) throw new Error('No backgrounds to build filter graph')
 
   const videoParts: string[] = []
-  const audioParts: string[] = []
   const videoOps: string[] = []
-  const audioOps: string[] = []
 
   for (let i = 0; i < count; i++) {
     const dur = durations[i]
     videoParts.push(
-      `[${i}:v]format=rgb24,scale=1280:720:force_original_aspect_ratio=decrease:in_range=pc:out_range=tv,pad=1280:720:(ow-iw)/2:(oh-ih)/2:color=black,fps=${FPS},setsar=1,format=yuv420p,trim=duration=${dur.toFixed(
+      `[${i}:v]format=rgb24,scale=1280:720:force_original_aspect_ratio=decrease:in_range=pc:out_range=tv,pad=1280:720:(ow-iw)/2:(oh-ih)/2:color=black,fps=${FPS},setsar=1,format=yuv420p,loop=loop=-1:size=0:start=0,trim=duration=${dur.toFixed(
         3,
-      )},setpts=PTS-STARTPTS[v${i}]`,
+      )},setpts=PTS-STARTPTS[bg${i}]`,
     )
+  }
+
+  let vPrev = 'bg0'
+
+  if (count > 1) {
+    videoOps.push(`${Array.from({ length: count }, (_, idx) => `[bg${idx}]`).join('')}concat=n=${count}:v=1:a=0[bgcat]`)
+    vPrev = 'bgcat'
+  }
+
+  videoOps.push(`[${vPrev}]loop=loop=-1:size=0:start=0,setpts=N/(${FPS}*TB)[vloop]`)
+  vPrev = 'vloop'
+
+  const totalDuration = durations.reduce((sum, d) => sum + d, 0)
+
+  const parts = [...videoParts, ...videoOps].filter(Boolean)
+
+  return {
+    filter: parts.join(';'),
+    vLabel: vPrev,
+    totalDuration,
+  }
+}
+
+const buildAudioGraph = (inputOffset: number, durations: number[], xfade: number, opts: { useAcrossfade: boolean }) => {
+  const count = durations.length
+  if (!count) throw new Error('No tracks to build audio graph')
+
+  const audioParts: string[] = []
+  const audioOps: string[] = []
+
+  for (let i = 0; i < count; i++) {
+    const dur = durations[i]
+    const inputIdx = inputOffset + i
     audioParts.push(
-      `[${count + i}:a]atrim=duration=${dur.toFixed(
+      `[${inputIdx}:a]atrim=duration=${dur.toFixed(
         3,
       )},asetpts=PTS-STARTPTS,aresample=${AUDIO_SR}:async=1:first_pts=0,aformat=sample_rates=${AUDIO_SR}:channel_layouts=stereo[a${i}]`,
     )
   }
 
-  let vPrev = 'v0'
   let aPrev = 'a0'
   let offset = durations[0] - xfade
 
   if (count > 1) {
-    if (opts.useXfade) {
-      for (let i = 1; i < count; i++) {
-        const vOut = i === count - 1 ? 'vmerged' : `vxf${i}`
-        videoOps.push(
-          `[${vPrev}][v${i}]xfade=transition=fade:duration=${xfade.toFixed(
-            3,
-          )}:offset=${offset.toFixed(3)},format=yuv420p[${vOut}]`,
-        )
-        vPrev = vOut
-        offset += durations[i] - xfade
-      }
-    } else {
-      videoOps.push(
-        `${Array.from({ length: count }, (_, idx) => `[v${idx}]`).join('')}concat=n=${count}:v=1:a=0[vmerged]`,
-      )
-      vPrev = 'vmerged'
-    }
-  }
-
-  if (count > 1) {
     if (opts.useAcrossfade) {
-      offset = durations[0] - xfade
       for (let i = 1; i < count; i++) {
         const aOut = i === count - 1 ? 'amerge' : `axf${i}`
         audioOps.push(`[${aPrev}][a${i}]acrossfade=d=${xfade.toFixed(3)}:c1=tri:c2=tri[${aOut}]`)
@@ -271,34 +276,26 @@ const buildFilterGraph = (
     }
   }
 
+  audioOps.push(`[${aPrev}]aloop=loop=-1:size=0:start=0,asetpts=N/${AUDIO_SR}/TB[aloop]`)
+  aPrev = 'aloop'
+
   const sumDur = durations.reduce((sum, d) => sum + d, 0)
-  const videoTotal = sumDur - (opts.useXfade ? xfade * (count - 1) : 0)
   const audioTotal = sumDur - (opts.useAcrossfade ? xfade * (count - 1) : 0)
-  const totalDuration = Math.min(videoTotal, audioTotal)
 
-  if (opts.loopOutput) {
-    videoOps.push(`[${vPrev}]loop=loop=-1:size=0:start=0,setpts=N/(${FPS}*TB)[vloop]`)
-    vPrev = 'vloop'
-    audioOps.push(`[${aPrev}]aloop=loop=-1:size=0:start=0,asetpts=N/${AUDIO_SR}/TB[aloop]`)
-    aPrev = 'aloop'
-  }
-
-  // Order matters: define parts first, then ops that reference them.
-  const parts = [...videoParts, ...audioParts, ...videoOps, ...audioOps].filter(Boolean)
+  const parts = [...audioParts, ...audioOps].filter(Boolean)
 
   return {
     filter: parts.join(';'),
-    vLabel: vPrev,
     aLabel: aPrev,
-    totalDuration,
+    totalDuration: audioTotal,
   }
 }
 
-export const startStream = async (opts: { backgroundPaths: string[]; tracks: string[]; streamUrl: string }) => {
+export const startStream = async (opts: { backgrounds: { path: string; duration: number }[]; tracks: string[]; streamUrl: string }) => {
   if (!opts.tracks.length) {
     return { ok: false, message: 'No tracks provided' }
   }
-  if (!opts.backgroundPaths.length) {
+  if (!opts.backgrounds.length) {
     return { ok: false, message: 'No backgrounds provided' }
   }
 
@@ -308,7 +305,7 @@ export const startStream = async (opts: { backgroundPaths: string[]; tracks: str
 
 const runStream = async (opts: StartOptions, preferXfade: boolean, attemptedFallback: boolean) => {
   const tracks = opts.tracks
-  const backgroundsForTracks = tracks.map((_, idx) => opts.backgroundPaths[idx % opts.backgroundPaths.length])
+  const backgrounds = opts.backgrounds
 
   let preparedTracks: { path: string; sanitized: boolean; remuxed: boolean }[]
   try {
@@ -319,6 +316,7 @@ const runStream = async (opts: StartOptions, preferXfade: boolean, attemptedFall
   }
 
   const inputTracks = preparedTracks.map((t) => t.path)
+  const backgroundDurations = backgrounds.map((b) => Math.max(0.5, b.duration || 0))
 
   let durations: number[]
   try {
@@ -331,9 +329,8 @@ const runStream = async (opts: StartOptions, preferXfade: boolean, attemptedFall
   const minDur = Math.min(...durations)
   const xfade = Math.min(DEFAULT_XFADE, Math.max(0.2, minDur / 2))
 
-  const hasXfadeFilter = FORCE_XFADE || hasFilter('xfade')
+  const useXfade = false
   const hasAcrossfadeFilter = FORCE_ACROSSFADE || hasFilter('acrossfade')
-  const useXfade = preferXfade && hasXfadeFilter
   const useAcrossfade = preferXfade ? hasAcrossfadeFilter : hasAcrossfadeFilter && !attemptedFallback
 
   let filterGraph: string
@@ -341,11 +338,12 @@ const runStream = async (opts: StartOptions, preferXfade: boolean, attemptedFall
   let aLabel: string
   let totalDuration: number
   try {
-    const built = buildFilterGraph(durations, xfade, { useXfade, useAcrossfade, loopOutput: true })
-    filterGraph = built.filter
-    vLabel = built.vLabel
-    aLabel = built.aLabel
-    totalDuration = built.totalDuration
+    const bgGraph = buildBackgroundGraph(backgroundDurations)
+    const audioGraph = buildAudioGraph(backgrounds.length, durations, xfade, { useAcrossfade })
+    filterGraph = [bgGraph.filter, audioGraph.filter].filter(Boolean).join(';')
+    vLabel = bgGraph.vLabel
+    aLabel = audioGraph.aLabel
+    totalDuration = Math.max(bgGraph.totalDuration, audioGraph.totalDuration)
   } catch (error) {
     const message = error instanceof Error ? error.message : 'Failed to build filter graph'
     return { ok: false, message }
@@ -357,8 +355,13 @@ const runStream = async (opts: StartOptions, preferXfade: boolean, attemptedFall
 
   args.push('-fflags', '+discardcorrupt', '-ignore_unknown', '-err_detect', 'ignore_err')
 
-  for (const bg of backgroundsForTracks) {
-    args.push('-loop', '1', '-i', bg)
+  for (const bg of backgrounds) {
+    const isImage = /\.(png|jpe?g|gif)$/i.test(bg.path)
+    if (isImage) {
+      args.push('-loop', '1', '-i', bg.path)
+    } else {
+      args.push('-stream_loop', '-1', '-i', bg.path)
+    }
   }
 
   for (const track of inputTracks) {
@@ -431,10 +434,7 @@ const runStream = async (opts: StartOptions, preferXfade: boolean, attemptedFall
         return
       }
 
-      if (useXfade && !attemptedFallback) {
-        console.warn('[stream] retrying without xfade due to ffmpeg failure')
-        setTimeout(() => runStream(opts, false, true), 300)
-      } else if (useAcrossfade && !attemptedFallback) {
+      if (useAcrossfade && !attemptedFallback) {
         console.warn('[stream] retrying without audio crossfade due to ffmpeg failure')
         setTimeout(() => runStream(opts, false, true), 300)
       } else {
@@ -457,9 +457,8 @@ const runStream = async (opts: StartOptions, preferXfade: boolean, attemptedFall
     JSON.stringify({
       ffmpegPath: FFMPEG_BIN,
       tracks: tracks.length,
-      backgrounds: backgroundsForTracks.length,
+      backgrounds: backgrounds.length,
       xfade,
-      useXfade,
       useAcrossfade,
       duration: totalDuration.toFixed(2),
       sanitizedTracks: preparedTracks.some((t) => t.sanitized),
@@ -469,7 +468,7 @@ const runStream = async (opts: StartOptions, preferXfade: boolean, attemptedFall
 
   return {
     ok: true,
-    message: useXfade ? 'Stream started (looping with crossfade)' : 'Stream started (video hard cuts, audio may crossfade)',
+    message: 'Stream started (looping backgrounds, audio playlist running)',
   }
 }
 
