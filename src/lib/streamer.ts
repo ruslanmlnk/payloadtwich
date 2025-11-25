@@ -162,9 +162,6 @@ export const startStream = async (opts: { backgroundPaths: string[]; tracks: str
 
   const useXfade = hasFilter('xfade')
   const useAcrossfade = hasFilter('acrossfade')
-  if (!useXfade) {
-    return { ok: false, message: 'ffmpeg build lacks xfade filter; install full build to enable smooth video transitions.' }
-  }
 
   let filterGraph: string
   let totalDuration: number
