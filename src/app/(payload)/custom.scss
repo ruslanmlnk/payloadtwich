@@ -1,0 +1,103 @@
+.start-stream-fab {
+  position: fixed;
+  right: 18px;
+  top: 50%;
+  transform: translateY(-50%);
+  display: inline-flex;
+  align-items: center;
+  gap: 10px;
+  padding: 12px 16px;
+  border-radius: 16px;
+  border: 1px solid rgba(255, 255, 255, 0.18);
+  background: linear-gradient(135deg, rgba(255, 255, 255, 0.16), rgba(255, 255, 255, 0.05));
+  box-shadow:
+    0 20px 40px rgba(0, 0, 0, 0.35),
+    inset 0 1px 0 rgba(255, 255, 255, 0.16),
+    inset 0 -1px 0 rgba(255, 255, 255, 0.1);
+  color: #f7f7f7;
+  cursor: pointer;
+  backdrop-filter: blur(14px);
+  -webkit-backdrop-filter: blur(14px);
+  outline: none;
+  transition: transform 0.2s ease, box-shadow 0.2s ease, border-color 0.2s ease;
+  z-index: 120;
+  isolation: isolate;
+  overflow: hidden;
+}
+
+.start-stream-fab:disabled {
+  cursor: not-allowed;
+  opacity: 0.85;
+}
+
+.start-stream-fab:hover {
+  transform: translateY(-50%) translateY(-3px);
+  border-color: rgba(255, 255, 255, 0.35);
+  box-shadow:
+    0 26px 50px rgba(0, 0, 0, 0.45),
+    inset 0 1px 0 rgba(255, 255, 255, 0.18),
+    inset 0 -1px 0 rgba(255, 255, 255, 0.12);
+}
+
+.start-stream-fab:active {
+  transform: translateY(-50%) translateY(1px);
+}
+
+.start-stream-fab__inner {
+  display: inline-flex;
+  align-items: center;
+  gap: 10px;
+  position: relative;
+  z-index: 1;
+}
+
+.start-stream-fab__icon {
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  width: 28px;
+  height: 28px;
+  border-radius: 50%;
+  background: rgba(255, 255, 255, 0.12);
+  box-shadow: inset 0 1px 0 rgba(255, 255, 255, 0.2);
+}
+
+.start-stream-fab__text {
+  font-weight: 600;
+  letter-spacing: 0.3px;
+  white-space: nowrap;
+}
+
+.start-stream-fab__meta {
+  display: block;
+  font-size: 11px;
+  margin-top: 4px;
+  opacity: 0.9;
+  color: #d7e9ff;
+}
+
+.start-stream-fab__glow {
+  position: absolute;
+  inset: 0;
+  background: radial-gradient(120% 120% at 100% 20%, rgba(255, 255, 255, 0.25), transparent 60%),
+    radial-gradient(100% 100% at 0% 80%, rgba(0, 200, 255, 0.25), transparent 60%);
+  opacity: 0.5;
+  z-index: 0;
+  pointer-events: none;
+}
+
+@media (max-width: 900px) {
+  .start-stream-fab {
+    top: auto;
+    bottom: 18px;
+    right: 16px;
+    left: 16px;
+    transform: none;
+    justify-content: center;
+  }
+
+  .start-stream-fab:hover,
+  .start-stream-fab:active {
+    transform: none;
+  }
+}
