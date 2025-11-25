@@ -5,6 +5,7 @@ import path from 'path'
 import { buildConfig } from 'payload'
 import { fileURLToPath } from 'url'
 import sharp from 'sharp'
+import { sql } from 'drizzle-orm'
 
 import { Users } from './collections/Users'
 import { Media } from './collections/Media'
@@ -35,6 +36,16 @@ export default buildConfig({
       connectionString: process.env.DATABASE_URI || '',
     },
   }),
+  onInit: async (payload) => {
+    // Ensure duration column exists for backgrounds; idempotent.
+    try {
+      await payload.db.drizzle.execute(
+        sql`alter table "stream_data_backgrounds" add column if not exists "duration" numeric`,
+      )
+    } catch (err) {
+      payload.logger.warn({ err }, 'failed to ensure duration column')
+    }
+  },
   sharp,
   plugins: [
     // storage-adapter-placeholder

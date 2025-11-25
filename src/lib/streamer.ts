@@ -207,13 +207,12 @@ const buildBackgroundGraph = (durations: number[]) => {
   const count = durations.length
   if (!count) throw new Error('No backgrounds to build filter graph')
 
-  const videoParts: string[] = []
-  const videoOps: string[] = []
+  const parts: string[] = []
 
   for (let i = 0; i < count; i++) {
     const dur = durations[i]
-    videoParts.push(
-      `[${i}:v]format=rgb24,scale=1280:720:force_original_aspect_ratio=decrease:in_range=pc:out_range=tv,pad=1280:720:(ow-iw)/2:(oh-ih)/2:color=black,fps=${FPS},setsar=1,format=yuv420p,loop=loop=-1:size=0:start=0,trim=duration=${dur.toFixed(
+    parts.push(
+      `[${i}:v]format=rgb24,scale=1280:720:force_original_aspect_ratio=decrease:in_range=pc:out_range=tv,pad=1280:720:(ow-iw)/2:(oh-ih)/2:color=black,fps=${FPS},setsar=1,format=yuv420p,trim=duration=${dur.toFixed(
         3,
       )},setpts=PTS-STARTPTS[bg${i}]`,
     )
@@ -226,12 +225,12 @@ const buildBackgroundGraph = (durations: number[]) => {
     vPrev = 'bgcat'
   }
 
-  videoOps.push(`[${vPrev}]loop=loop=-1:size=0:start=0,setpts=N/(${FPS}*TB)[vloop]`)
+  videoOps.push(`[${vPrev}]streamloop=-1[vloop]`)
   vPrev = 'vloop'
 
   const totalDuration = durations.reduce((sum, d) => sum + d, 0)
 
-  const parts = [...videoParts, ...videoOps].filter(Boolean)
+  parts.push(...videoOps.filter(Boolean))
 
   return {
     filter: parts.join(';'),
@@ -244,13 +243,12 @@ const buildAudioGraph = (inputOffset: number, durations: number[], xfade: number
   const count = durations.length
   if (!count) throw new Error('No tracks to build audio graph')
 
-  const audioParts: string[] = []
-  const audioOps: string[] = []
+  const parts: string[] = []
 
   for (let i = 0; i < count; i++) {
     const dur = durations[i]
     const inputIdx = inputOffset + i
-    audioParts.push(
+    parts.push(
       `[${inputIdx}:a]atrim=duration=${dur.toFixed(
         3,
       )},asetpts=PTS-STARTPTS,aresample=${AUDIO_SR}:async=1:first_pts=0,aformat=sample_rates=${AUDIO_SR}:channel_layouts=stereo[a${i}]`,
@@ -264,25 +262,22 @@ const buildAudioGraph = (inputOffset: number, durations: number[], xfade: number
     if (opts.useAcrossfade) {
       for (let i = 1; i < count; i++) {
         const aOut = i === count - 1 ? 'amerge' : `axf${i}`
-        audioOps.push(`[${aPrev}][a${i}]acrossfade=d=${xfade.toFixed(3)}:c1=tri:c2=tri[${aOut}]`)
+        parts.push(`[${aPrev}][a${i}]acrossfade=d=${xfade.toFixed(3)}:c1=tri:c2=tri[${aOut}]`)
         aPrev = aOut
         offset += durations[i] - xfade
       }
     } else {
-      audioOps.push(
+      parts.push(
         `${Array.from({ length: count }, (_, idx) => `[a${idx}]`).join('')}concat=n=${count}:v=0:a=1[amerge]`,
       )
       aPrev = 'amerge'
     }
   }
 
-  audioOps.push(`[${aPrev}]aloop=loop=-1:size=0:start=0,asetpts=N/${AUDIO_SR}/TB[aloop]`)
+  const audioTotal = durations.reduce((sum, d) => sum + d, 0) - (opts.useAcrossfade ? xfade * (count - 1) : 0)
+  const loopSize = Math.max(1, Math.floor(audioTotal * AUDIO_SR))
+  parts.push(`[${aPrev}]aloop=loop=-1:size=${loopSize}:start=0,asetpts=N/${AUDIO_SR}/TB[aloop]`)
   aPrev = 'aloop'
-
-  const sumDur = durations.reduce((sum, d) => sum + d, 0)
-  const audioTotal = sumDur - (opts.useAcrossfade ? xfade * (count - 1) : 0)
-
-  const parts = [...audioParts, ...audioOps].filter(Boolean)
 
   return {
     filter: parts.join(';'),
