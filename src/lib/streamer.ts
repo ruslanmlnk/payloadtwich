@@ -220,15 +220,16 @@ const buildBackgroundGraph = (durations: number[]) => {
 
   let vPrev = 'bg0'
 
+  const totalDuration = durations.reduce((sum, d) => sum + d, 0)
+  const totalFrames = Math.max(1, Math.ceil(totalDuration * FPS))
+
   if (count > 1) {
     parts.push(`${Array.from({ length: count }, (_, idx) => `[bg${idx}]`).join('')}concat=n=${count}:v=1:a=0[bgcat]`)
     vPrev = 'bgcat'
   }
 
-  parts.push(`[${vPrev}]streamloop=-1[vloop]`)
+  parts.push(`[${vPrev}]loop=loop=-1:size=${totalFrames}:start=0,setpts=N/(${FPS}*TB)[vloop]`)
   vPrev = 'vloop'
-
-  const totalDuration = durations.reduce((sum, d) => sum + d, 0)
 
   return {
     filter: parts.join(';'),
