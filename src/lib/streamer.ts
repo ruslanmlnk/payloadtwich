@@ -164,6 +164,14 @@ export const startStream = async (opts: { backgroundPaths: string[]; tracks: str
 
   const useXfade = FORCE_XFADE || hasFilter('xfade')
   const useAcrossfade = FORCE_ACROSSFADE || hasFilter('acrossfade')
+  if (!useXfade) {
+    return {
+      ok: false,
+      message:
+        'ffmpeg does not have xfade. Install a full ffmpeg build (with xfade) or set FFMPEG_PATH to it. Current: ' +
+        FFMPEG_BIN,
+    }
+  }
 
   let filterGraph: string
   let totalDuration: number
