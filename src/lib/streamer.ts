@@ -74,8 +74,8 @@ const buildFilterGraph = (durations: number[], xfade: number, opts: { useXfade: 
     )
   }
 
-  let videoChain = ''
-  let audioChain = ''
+  const videoOps: string[] = []
+  const audioOps: string[] = []
 
   let vPrev = 'v0'
   let aPrev = 'a0'
@@ -85,16 +85,18 @@ const buildFilterGraph = (durations: number[], xfade: number, opts: { useXfade: 
     if (opts.useXfade) {
       for (let i = 1; i < count; i++) {
         const vOut = i === count - 1 ? 'vmerged' : `vxf${i}`
-        videoChain += `[${vPrev}][v${i}]xfade=transition=fade:duration=${xfade.toFixed(
-          3,
-        )}:offset=${offset.toFixed(3)},format=yuv420p[${vOut}];`
+        videoOps.push(
+          `[${vPrev}][v${i}]xfade=transition=fade:duration=${xfade.toFixed(
+            3,
+          )}:offset=${offset.toFixed(3)},format=yuv420p[${vOut}]`,
+        )
         vPrev = vOut
         offset += durations[i] - xfade
       }
     } else {
-      videoChain = `${Array.from({ length: count }, (_, idx) => `[v${idx}]`).join(
-        '',
-      )}concat=n=${count}:v=1:a=0[vmerged];`
+      videoOps.push(
+        `${Array.from({ length: count }, (_, idx) => `[v${idx}]`).join('')}concat=n=${count}:v=1:a=0[vmerged]`,
+      )
       vPrev = 'vmerged'
     }
   }
@@ -104,16 +106,16 @@ const buildFilterGraph = (durations: number[], xfade: number, opts: { useXfade: 
       offset = durations[0] - xfade
       for (let i = 1; i < count; i++) {
         const aOut = i === count - 1 ? 'amerge' : `axf${i}`
-        audioChain += `[${aPrev}][a${i}]acrossfade=d=${xfade.toFixed(
-          3,
-        )}:c1=tri:c2=tri[${aOut}];`
+        audioOps.push(
+          `[${aPrev}][a${i}]acrossfade=d=${xfade.toFixed(3)}:c1=tri:c2=tri[${aOut}]`,
+        )
         aPrev = aOut
         offset += durations[i] - xfade
       }
     } else {
-      audioChain = `${Array.from({ length: count }, (_, idx) => `[a${idx}]`).join(
-        '',
-      )}concat=n=${count}:v=0:a=1[amerge];`
+      audioOps.push(
+        `${Array.from({ length: count }, (_, idx) => `[a${idx}]`).join('')}concat=n=${count}:v=0:a=1[amerge]`,
+      )
       aPrev = 'amerge'
     }
   }
@@ -128,7 +130,7 @@ const buildFilterGraph = (durations: number[], xfade: number, opts: { useXfade: 
   const loopVideo = `[${vPrev}]format=yuv420p,loop=loop=-1:size=${totalFrames}:start=0,setpts=N/FRAME_RATE/TB[vout]`
   const loopAudio = `[${aPrev}]aloop=loop=-1:size=${totalSamples}:start=0,asetpts=N/${AUDIO_SR}/TB[aout]`
 
-  const parts = [...videoParts, ...audioParts, videoChain, audioChain, loopVideo, loopAudio].filter(Boolean)
+  const parts = [...videoParts, ...audioParts, ...videoOps, ...audioOps, loopVideo, loopAudio].filter(Boolean)
 
   return {
     filter: parts.join(';'),
