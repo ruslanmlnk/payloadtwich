@@ -221,16 +221,14 @@ const buildBackgroundGraph = (durations: number[]) => {
   let vPrev = 'bg0'
 
   if (count > 1) {
-    videoOps.push(`${Array.from({ length: count }, (_, idx) => `[bg${idx}]`).join('')}concat=n=${count}:v=1:a=0[bgcat]`)
+    parts.push(`${Array.from({ length: count }, (_, idx) => `[bg${idx}]`).join('')}concat=n=${count}:v=1:a=0[bgcat]`)
     vPrev = 'bgcat'
   }
 
-  videoOps.push(`[${vPrev}]streamloop=-1[vloop]`)
+  parts.push(`[${vPrev}]streamloop=-1[vloop]`)
   vPrev = 'vloop'
 
   const totalDuration = durations.reduce((sum, d) => sum + d, 0)
-
-  parts.push(...videoOps.filter(Boolean))
 
   return {
     filter: parts.join(';'),
