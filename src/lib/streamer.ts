@@ -65,7 +65,7 @@ const buildFilterGraph = (durations: number[], xfade: number, opts: { useXfade: 
   for (let i = 0; i < count; i++) {
     const dur = durations[i]
     videoParts.push(
-      `[${i}:v]format=rgba,scale=1280:720:force_original_aspect_ratio=decrease,pad=1280:720:(ow-iw)/2:(oh-ih)/2,setsar=1,trim=duration=${dur.toFixed(
+      `[${i}:v]format=rgb24,scale=1280:720:force_original_aspect_ratio=decrease:in_range=pc:out_range=tv,pad=1280:720:(ow-iw)/2:(oh-ih)/2:color=black,setsar=1,format=yuv420p,trim=duration=${dur.toFixed(
         3,
       )},setpts=PTS-STARTPTS[v${i}]`,
     )
@@ -162,6 +162,9 @@ export const startStream = async (opts: { backgroundPaths: string[]; tracks: str
 
   const useXfade = hasFilter('xfade')
   const useAcrossfade = hasFilter('acrossfade')
+  if (!useXfade) {
+    return { ok: false, message: 'ffmpeg build lacks xfade filter; install full build to enable smooth video transitions.' }
+  }
 
   let filterGraph: string
   let totalDuration: number
