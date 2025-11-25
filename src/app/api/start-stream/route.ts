@@ -59,7 +59,7 @@ export async function POST() {
       stopStream()
     }
 
-    const result = startStream({
+    const result = await startStream({
       backgroundPaths,
       streamUrl,
       tracks,
