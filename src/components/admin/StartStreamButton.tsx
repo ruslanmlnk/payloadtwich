@@ -2,16 +2,35 @@
 
 import React, { useCallback, useState } from 'react'
 
-type Status = 'idle' | 'starting' | 'running' | 'error'
+type Status = 'idle' | 'starting' | 'running' | 'stopping' | 'error'
 
 const StartStreamButton: React.FC = () => {
   const [status, setStatus] = useState<Status>('idle')
   const [message, setMessage] = useState<string>('')
 
-  const handleStart = useCallback(async () => {
-    setStatus('starting')
+  const handleToggle = useCallback(async () => {
+    if (status === 'starting' || status === 'stopping') return
+
     setMessage('')
 
+    if (status === 'running') {
+      setStatus('stopping')
+      try {
+        const res = await fetch('/api/stop-stream', { method: 'POST' })
+        const data = (await res.json().catch(() => ({}))) as { message?: string }
+        if (!res.ok) {
+          throw new Error(data?.message || 'Не вдалося зупинити трансляцію')
+        }
+        setStatus('idle')
+        setMessage(data?.message || 'Стрім зупинено')
+      } catch (error) {
+        setStatus('error')
+        setMessage(error instanceof Error ? error.message : 'Не вдалося зупинити трансляцію')
+      }
+      return
+    }
+
+    setStatus('starting')
     try {
       const res = await fetch('/api/start-stream', { method: 'POST' })
       const data = (await res.json().catch(() => ({}))) as { message?: string }
@@ -26,22 +45,24 @@ const StartStreamButton: React.FC = () => {
       setStatus('error')
       setMessage(error instanceof Error ? error.message : 'Не вдалося запустити трансляцію')
     }
-  }, [])
+  }, [status])
 
   const label =
     status === 'starting'
       ? 'Запускаю…'
       : status === 'running'
-        ? 'Стрім запущено'
-        : 'Почати трансляцію'
+        ? 'Зупинити трансляцію'
+        : status === 'stopping'
+          ? 'Зупиняю…'
+          : 'Почати трансляцію'
 
   return (
     <button
       aria-live="polite"
       aria-label="Почати трансляцію"
       className="start-stream-fab"
-      disabled={status === 'starting'}
-      onClick={handleStart}
+      disabled={status === 'starting' || status === 'stopping'}
+      onClick={handleToggle}
       type="button"
     >
       <span className="start-stream-fab__glow" aria-hidden="true" />

@@ -1,9 +1,9 @@
-import { spawn, type ChildProcessWithoutNullStreams } from 'child_process'
+import { spawn, type ChildProcess } from 'child_process'
 
 type StreamState = {
-  backgroundPath: string
+  backgroundPaths: string[]
   currentIndex: number
-  process: ChildProcessWithoutNullStreams | null
+  process: ChildProcess | null
   running: boolean
   streamUrl: string
   tracks: string[]
@@ -12,7 +12,7 @@ type StreamState = {
 const FFMPEG_BIN = process.env.FFMPEG_PATH || 'ffmpeg'
 
 const state: StreamState = {
-  backgroundPath: '',
+  backgroundPaths: [],
   currentIndex: 0,
   process: null,
   running: false,
@@ -20,7 +20,7 @@ const state: StreamState = {
   tracks: [],
 }
 
-const buildArgs = (track: string) => [
+const buildArgs = (track: string, backgroundPath: string) => [
   '-re',
   '-hide_banner',
   '-loglevel',
@@ -31,7 +31,7 @@ const buildArgs = (track: string) => [
   '-framerate',
   '30',
   '-i',
-  state.backgroundPath,
+  backgroundPath,
   '-i',
   track,
   '-map',
@@ -69,8 +69,18 @@ const buildArgs = (track: string) => [
 ]
 
 const startNext = () => {
+  if (!state.tracks.length || !state.backgroundPaths.length) {
+    stopStream()
+    return
+  }
+
   const track = state.tracks[state.currentIndex]
-  const args = buildArgs(track)
+  const bgIndex = state.backgroundPaths.length
+    ? state.currentIndex % state.backgroundPaths.length
+    : 0
+  const backgroundPath = state.backgroundPaths[bgIndex] || state.backgroundPaths[0]
+
+  const args = buildArgs(track, backgroundPath)
 
   const proc = spawn(FFMPEG_BIN, args, { stdio: 'inherit' })
   state.process = proc
@@ -79,7 +89,7 @@ const startNext = () => {
     if (!state.running) return
     state.process = null
     state.currentIndex = (state.currentIndex + 1) % state.tracks.length
-    setTimeout(startNext, 1000)
+    setTimeout(startNext, 200) // quick hop to next track for near-seamless loop
   })
 
   proc.on('error', (err) => {
@@ -88,14 +98,17 @@ const startNext = () => {
   })
 }
 
-export const startStream = (opts: { backgroundPath: string; tracks: string[]; streamUrl: string }) => {
+export const startStream = (opts: { backgroundPaths: string[]; tracks: string[]; streamUrl: string }) => {
   if (!opts.tracks.length) {
     return { ok: false, message: 'No tracks provided' }
+  }
+  if (!opts.backgroundPaths.length) {
+    return { ok: false, message: 'No backgrounds provided' }
   }
 
   stopStream()
 
-  state.backgroundPath = opts.backgroundPath
+  state.backgroundPaths = opts.backgroundPaths
   state.streamUrl = opts.streamUrl
   state.tracks = opts.tracks
   state.currentIndex = 0

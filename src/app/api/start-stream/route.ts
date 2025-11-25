@@ -29,13 +29,14 @@ export async function POST() {
     const payload = await getPayload({ config: payloadConfig })
     const streamData = (await payload.findGlobal({ slug: 'stream-data', depth: 2 })) as StreamDatum
 
-    const backgroundPath =
+    const backgroundPaths =
       streamData.backgrounds
         ?.map((item) => (item?.image && typeof item.image === 'object' ? resolveMediaPath(item.image as Media) : null))
-        .find((val): val is string => Boolean(val)) || null
-    if (!backgroundPath) {
+        .filter((val): val is string => Boolean(val)) || []
+
+    if (!backgroundPaths.length) {
       return NextResponse.json(
-        { message: 'Не знайдено фонового зображення (backgrounds -> image) на диску' },
+        { message: 'Background image not found on disk (backgrounds -> image).' },
         { status: 400 },
       )
     }
@@ -47,7 +48,7 @@ export async function POST() {
 
     if (!tracks.length) {
       return NextResponse.json(
-        { message: 'Немає mp3 файлів у Stream Data або їх немає на диску' },
+        { message: 'No mp3 files found in Stream Data or on disk.' },
         { status: 400 },
       )
     }
@@ -59,7 +60,7 @@ export async function POST() {
     }
 
     const result = startStream({
-      backgroundPath,
+      backgroundPaths,
       streamUrl,
       tracks,
     })
@@ -72,10 +73,10 @@ export async function POST() {
       message: result.message,
       streamUrl,
       tracks: tracks.length,
-      background: path.basename(backgroundPath),
+      backgrounds: backgroundPaths.length,
     })
   } catch (error) {
     console.error('[stream] failed to start stream', error)
-    return NextResponse.json({ message: 'Сталася помилка при запуску стріму' }, { status: 500 })
+    return NextResponse.json({ message: 'Stream failed to start due to an error.' }, { status: 500 })
   }
 }
