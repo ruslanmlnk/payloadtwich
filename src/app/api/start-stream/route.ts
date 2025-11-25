@@ -30,7 +30,7 @@ export async function POST() {
     const streamData = (await payload.findGlobal({ slug: 'stream-data', depth: 2 })) as StreamDatum
 
     const backgrounds =
-      streamData.backgrounds
+      (streamData.backgrounds as Array<{ image?: Media | number | null; duration?: number | string | null }> | undefined)
         ?.map((item) => {
           const path = item?.image && typeof item.image === 'object' ? resolveMediaPath(item.image as Media) : null
           const duration = Number(item?.duration) || 0
