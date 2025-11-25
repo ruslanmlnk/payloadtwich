@@ -220,16 +220,12 @@ const buildBackgroundGraph = (durations: number[]) => {
 
   let vPrev = 'bg0'
 
-  const totalDuration = durations.reduce((sum, d) => sum + d, 0)
-  const totalFrames = Math.max(1, Math.ceil(totalDuration * FPS))
-
   if (count > 1) {
     parts.push(`${Array.from({ length: count }, (_, idx) => `[bg${idx}]`).join('')}concat=n=${count}:v=1:a=0[bgcat]`)
     vPrev = 'bgcat'
   }
 
-  parts.push(`[${vPrev}]loop=loop=-1:size=${totalFrames}:start=0,setpts=N/(${FPS}*TB)[vloop]`)
-  vPrev = 'vloop'
+  const totalDuration = durations.reduce((sum, d) => sum + d, 0)
 
   return {
     filter: parts.join(';'),
@@ -274,9 +270,6 @@ const buildAudioGraph = (inputOffset: number, durations: number[], xfade: number
   }
 
   const audioTotal = durations.reduce((sum, d) => sum + d, 0) - (opts.useAcrossfade ? xfade * (count - 1) : 0)
-  const loopSize = Math.max(1, Math.floor(audioTotal * AUDIO_SR))
-  parts.push(`[${aPrev}]aloop=loop=-1:size=${loopSize}:start=0,asetpts=N/${AUDIO_SR}/TB[aloop]`)
-  aPrev = 'aloop'
 
   return {
     filter: parts.join(';'),
