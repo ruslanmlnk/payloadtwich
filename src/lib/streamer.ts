@@ -17,6 +17,23 @@ const state: StreamState = {
   running: false,
 }
 
+const filterCache = new Map<string, boolean>()
+
+const hasFilter = (name: string): boolean => {
+  if (filterCache.has(name)) return filterCache.get(name) as boolean
+
+  try {
+    const res = spawnSync(FFMPEG_BIN, ['-hide_banner', '-filters'])
+    const output = `${res.stdout || ''}${res.stderr || ''}`.toString().toLowerCase()
+    const found = output.includes(` ${name.toLowerCase()} `)
+    filterCache.set(name, found)
+    return found
+  } catch {
+    filterCache.set(name, false)
+    return false
+  }
+}
+
 const probeDuration = (file: string): number => {
   const res = spawnSync(FFPROBE_BIN, [
     '-v',
@@ -36,7 +53,7 @@ const probeDuration = (file: string): number => {
   return dur
 }
 
-const buildFilterGraph = (durations: number[], xfade: number) => {
+const buildFilterGraph = (durations: number[], xfade: number, opts: { useXfade: boolean; useAcrossfade: boolean }) => {
   const count = durations.length
   if (!count) throw new Error('No durations to build filter graph')
 
@@ -64,23 +81,47 @@ const buildFilterGraph = (durations: number[], xfade: number) => {
   let aPrev = 'a0'
   let offset = durations[0] - xfade
 
-  for (let i = 1; i < count; i++) {
-    const vOut = i === count - 1 ? 'vmerged' : `vxf${i}`
-    videoChain += `[${vPrev}][v${i}]xfade=transition=fade:duration=${xfade.toFixed(
-      3,
-    )}:offset=${offset.toFixed(3)},format=yuv420p[${vOut}];`
-    vPrev = vOut
-
-    const aOut = i === count - 1 ? 'amerge' : `axf${i}`
-    audioChain += `[${aPrev}][a${i}]acrossfade=d=${xfade.toFixed(
-      3,
-    )}:c1=tri:c2=tri[${aOut}];`
-    aPrev = aOut
-
-    offset += durations[i] - xfade
+  if (count > 1) {
+    if (opts.useXfade) {
+      for (let i = 1; i < count; i++) {
+        const vOut = i === count - 1 ? 'vmerged' : `vxf${i}`
+        videoChain += `[${vPrev}][v${i}]xfade=transition=fade:duration=${xfade.toFixed(
+          3,
+        )}:offset=${offset.toFixed(3)},format=yuv420p[${vOut}];`
+        vPrev = vOut
+        offset += durations[i] - xfade
+      }
+    } else {
+      videoChain = `${Array.from({ length: count }, (_, idx) => `[v${idx}]`).join(
+        '',
+      )}concat=n=${count}:v=1:a=0[vmerged];`
+      vPrev = 'vmerged'
+    }
   }
 
-  const totalDuration = durations.reduce((sum, d) => sum + d, 0) - xfade * (count - 1)
+  if (count > 1) {
+    if (opts.useAcrossfade) {
+      offset = durations[0] - xfade
+      for (let i = 1; i < count; i++) {
+        const aOut = i === count - 1 ? 'amerge' : `axf${i}`
+        audioChain += `[${aPrev}][a${i}]acrossfade=d=${xfade.toFixed(
+          3,
+        )}:c1=tri:c2=tri[${aOut}];`
+        aPrev = aOut
+        offset += durations[i] - xfade
+      }
+    } else {
+      audioChain = `${Array.from({ length: count }, (_, idx) => `[a${idx}]`).join(
+        '',
+      )}concat=n=${count}:v=0:a=1[amerge];`
+      aPrev = 'amerge'
+    }
+  }
+
+  const sumDur = durations.reduce((sum, d) => sum + d, 0)
+  const videoTotal = sumDur - (opts.useXfade ? xfade * (count - 1) : 0)
+  const audioTotal = sumDur - (opts.useAcrossfade ? xfade * (count - 1) : 0)
+  const totalDuration = Math.min(videoTotal, audioTotal)
   const totalFrames = Math.max(1, Math.ceil(totalDuration * FPS))
   const totalSamples = Math.max(1, Math.ceil(totalDuration * AUDIO_SR))
 
@@ -117,10 +158,13 @@ export const startStream = async (opts: { backgroundPaths: string[]; tracks: str
   const minDur = Math.min(...durations)
   const xfade = Math.min(DEFAULT_XFADE, Math.max(0.2, minDur / 2))
 
+  const useXfade = hasFilter('xfade')
+  const useAcrossfade = hasFilter('acrossfade')
+
   let filterGraph: string
   let totalDuration: number
   try {
-    const built = buildFilterGraph(durations, xfade)
+    const built = buildFilterGraph(durations, xfade, { useXfade, useAcrossfade })
     filterGraph = built.filter
     totalDuration = built.totalDuration
   } catch (error) {
@@ -197,11 +241,16 @@ export const startStream = async (opts: { backgroundPaths: string[]; tracks: str
       tracks: tracks.length,
       backgrounds: backgroundsForTracks.length,
       xfade,
+      useXfade,
+      useAcrossfade,
       duration: totalDuration.toFixed(2),
     }),
   )
 
-  return { ok: true, message: 'Stream started (looping with crossfade)' }
+  return {
+    ok: true,
+    message: useXfade ? 'Stream started (looping with crossfade)' : 'Stream started (video hard cuts, audio may crossfade)',
+  }
 }
 
 export const stopStream = () => {
