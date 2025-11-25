@@ -5,6 +5,12 @@ type StreamState = {
   running: boolean
 }
 
+type StartOptions = {
+  backgroundPaths: string[]
+  tracks: string[]
+  streamUrl: string
+}
+
 const FFMPEG_BIN = process.env.FFMPEG_PATH || 'ffmpeg'
 const FFPROBE_BIN = process.env.FFPROBE_PATH || 'ffprobe'
 const FORCE_XFADE = process.env.FORCE_XFADE === 'true'
@@ -148,6 +154,10 @@ export const startStream = async (opts: { backgroundPaths: string[]; tracks: str
     return { ok: false, message: 'No backgrounds provided' }
   }
 
+  return runStream(opts, true, false)
+}
+
+const runStream = async (opts: StartOptions, preferXfade: boolean, attemptedFallback: boolean) => {
   const tracks = opts.tracks
   const backgroundsForTracks = tracks.map((_, idx) => opts.backgroundPaths[idx % opts.backgroundPaths.length])
 
@@ -162,16 +172,10 @@ export const startStream = async (opts: { backgroundPaths: string[]; tracks: str
   const minDur = Math.min(...durations)
   const xfade = Math.min(DEFAULT_XFADE, Math.max(0.2, minDur / 2))
 
-  const useXfade = FORCE_XFADE || hasFilter('xfade')
-  const useAcrossfade = FORCE_ACROSSFADE || hasFilter('acrossfade')
-  if (!useXfade) {
-    return {
-      ok: false,
-      message:
-        'ffmpeg does not have xfade. Install a full ffmpeg build (with xfade) or set FFMPEG_PATH to it. Current: ' +
-        FFMPEG_BIN,
-    }
-  }
+  const hasXfadeFilter = FORCE_XFADE || hasFilter('xfade')
+  const hasAcrossfadeFilter = FORCE_ACROSSFADE || hasFilter('acrossfade')
+  const useXfade = preferXfade && hasXfadeFilter
+  const useAcrossfade = hasAcrossfadeFilter
 
   let filterGraph: string
   let totalDuration: number
@@ -240,6 +244,12 @@ export const startStream = async (opts: { backgroundPaths: string[]; tracks: str
     console.log('[stream] ffmpeg exited', { code, signal })
     state.running = false
     state.process = null
+
+    // If we tried xfade and ffmpeg failed (non-zero exit or signal), retry once without xfade to keep stream alive
+    if (useXfade && !attemptedFallback && (signal || (typeof code === 'number' && code !== 0))) {
+      console.warn('[stream] retrying without xfade due to ffmpeg failure')
+      runStream(opts, false, true)
+    }
   })
 
   proc.on('error', (err) => {
