@@ -352,14 +352,6 @@ const runStream = async (opts: StartOptions, preferXfade: boolean, attemptedFall
     '-ignore_unknown',
     '-err_detect',
     'ignore_err',
-    '-reconnect',
-    '1',
-    '-reconnect_streamed',
-    '1',
-    '-reconnect_at_eof',
-    '1',
-    '-reconnect_delay_max',
-    '2',
   )
 
   for (const bg of backgrounds) {
