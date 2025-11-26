@@ -405,6 +405,7 @@ const runStream = async (opts: StartOptions, preferXfade: boolean, attemptedFall
 
   const procs: ChildProcess[] = []
   let restartScheduled = false
+  let exitHandled = false
 
   const scheduleRestart = (prefer: boolean, attempted: boolean, delay: number) => {
     if (restartScheduled) return
@@ -412,7 +413,9 @@ const runStream = async (opts: StartOptions, preferXfade: boolean, attemptedFall
     setTimeout(() => runStream(opts, prefer, attempted), delay)
   }
 
-  const handleExit = (code: number | null, signal: NodeJS.Signals | null) => {
+  const handleExitOnce = (code: number | null, signal: NodeJS.Signals | null) => {
+    if (exitHandled) return
+    exitHandled = true
     const wasRunning = state.running
     state.running = false
     state.processes = []
@@ -457,13 +460,13 @@ const runStream = async (opts: StartOptions, preferXfade: boolean, attemptedFall
     proc.on('close', (code, signal) => {
       console.log('[stream] ffmpeg exited', { code, signal, url })
       stopStream()
-      handleExit(code, signal)
+      handleExitOnce(code, signal)
     })
 
     proc.on('error', (err) => {
       console.error('[stream] ffmpeg error', { url, err })
       stopStream()
-      handleExit(1, null)
+      handleExitOnce(1, null)
     })
   }
 
