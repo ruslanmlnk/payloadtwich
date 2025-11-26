@@ -5,7 +5,7 @@ import path from 'path'
 import { spawn, spawnSync, type ChildProcess } from 'child_process'
 
 type StreamState = {
-  process: ChildProcess | null
+  processes: ChildProcess[]
   running: boolean
   lastOpts: StartOptions | null
   consecutiveFailures: number
@@ -31,7 +31,7 @@ const FAILURE_RESET_MS = 30_000
 const MAX_CONSECUTIVE_FAILURES = 3
 
 const state: StreamState = {
-  process: null,
+  processes: [],
   running: false,
   lastOpts: null,
   consecutiveFailures: 0,
@@ -345,9 +345,9 @@ const runStream = async (opts: StartOptions, preferXfade: boolean, attemptedFall
 
   stopStream()
 
-  const args: string[] = ['-re', '-hide_banner', '-loglevel', 'warning']
+  const argsBase: string[] = ['-re', '-hide_banner', '-loglevel', 'warning']
 
-  args.push(
+  argsBase.push(
     '-fflags',
     '+discardcorrupt',
     '-ignore_unknown',
@@ -358,17 +358,17 @@ const runStream = async (opts: StartOptions, preferXfade: boolean, attemptedFall
   for (const bg of backgrounds) {
     const isImage = /\.(png|jpe?g|gif)$/i.test(bg.path)
     if (isImage) {
-      args.push('-loop', '1', '-i', bg.path)
+      argsBase.push('-loop', '1', '-i', bg.path)
     } else {
-      args.push('-stream_loop', '-1', '-i', bg.path)
+      argsBase.push('-stream_loop', '-1', '-i', bg.path)
     }
   }
 
   for (const track of inputTracks) {
-    args.push('-i', track)
+    argsBase.push('-i', track)
   }
 
-  args.push(
+  argsBase.push(
     '-filter_complex',
     filterGraph,
     '-map',
@@ -403,30 +403,24 @@ const runStream = async (opts: StartOptions, preferXfade: boolean, attemptedFall
     '1',
   )
 
-  if (opts.streamUrls.length > 1) {
-    const teeArg = opts.streamUrls.map((url) => `[f=flv:onfail=ignore]${url}`).join('|')
-    args.push('-f', 'tee', teeArg)
-  } else {
-    args.push('-f', 'flv', opts.streamUrls[0])
+  const procs: ChildProcess[] = []
+  let restartScheduled = false
+
+  const scheduleRestart = (prefer: boolean, attempted: boolean, delay: number) => {
+    if (restartScheduled) return
+    restartScheduled = true
+    setTimeout(() => runStream(opts, prefer, attempted), delay)
   }
 
-  const proc = spawn(FFMPEG_BIN, args, { stdio: 'inherit' })
-  state.process = proc
-  state.running = true
-
-  proc.on('close', (code, signal) => {
-    console.log('[stream] ffmpeg exited', { code, signal })
+  const handleExit = (code: number | null, signal: NodeJS.Signals | null) => {
     const wasRunning = state.running
     state.running = false
-    state.process = null
+    state.processes = []
+
     if (code === 0) {
       state.consecutiveFailures = 0
       state.lastFailureAt = 0
-    }
-
-    if (!wasRunning) return
-
-    if (signal || (typeof code === 'number' && code !== 0)) {
+    } else if (signal || (typeof code === 'number' && code !== 0)) {
       const now = Date.now()
       if (now - state.lastFailureAt > FAILURE_RESET_MS) {
         state.consecutiveFailures = 0
@@ -442,21 +436,39 @@ const runStream = async (opts: StartOptions, preferXfade: boolean, attemptedFall
 
       if (useAcrossfade && !attemptedFallback) {
         console.warn('[stream] retrying without audio crossfade due to ffmpeg failure')
-        setTimeout(() => runStream(opts, false, true), 300)
+        scheduleRestart(false, true, 300)
       } else {
         console.warn('[stream] restart after failure (xfade/crossfade off)')
-        setTimeout(() => runStream(opts, false, true), 500)
+        scheduleRestart(false, true, 500)
       }
-    } else {
-      // completed playlist, restart to loop
-      setTimeout(() => runStream(opts, preferXfade, attemptedFallback), 200)
+      return
     }
-  })
 
-  proc.on('error', (err) => {
-    console.error('[stream] ffmpeg error', err)
-    stopStream()
-  })
+    if (wasRunning) {
+      scheduleRestart(preferXfade, attemptedFallback, 200)
+    }
+  }
+
+  for (const url of opts.streamUrls) {
+    const args = [...argsBase, '-f', 'flv', url]
+    const proc = spawn(FFMPEG_BIN, args, { stdio: 'inherit' })
+    procs.push(proc)
+
+    proc.on('close', (code, signal) => {
+      console.log('[stream] ffmpeg exited', { code, signal, url })
+      stopStream()
+      handleExit(code, signal)
+    })
+
+    proc.on('error', (err) => {
+      console.error('[stream] ffmpeg error', { url, err })
+      stopStream()
+      handleExit(1, null)
+    })
+  }
+
+  state.processes = procs
+  state.running = true
 
   console.log(
     '[stream] started ffmpeg',
@@ -485,15 +497,17 @@ export const stopStream = () => {
   state.consecutiveFailures = 0
   state.lastFailureAt = 0
 
-  if (state.process) {
-    try {
-      state.process.kill()
-    } catch (err) {
-      console.error('[stream] failed to kill ffmpeg', err)
+  if (state.processes.length) {
+    for (const proc of state.processes) {
+      try {
+        proc.kill()
+      } catch (err) {
+        console.error('[stream] failed to kill ffmpeg', err)
+      }
     }
   }
 
-  state.process = null
+  state.processes = []
   if (wasRunning) {
     state.lastOpts = null
   }
