@@ -15,7 +15,7 @@ type StreamState = {
 type StartOptions = {
   backgrounds: { path: string; duration: number }[]
   tracks: string[]
-  streamUrl: string
+  streamUrls: string[]
 }
 
 const FFMPEG_BIN = process.env.FFMPEG_PATH || 'ffmpeg'
@@ -278,12 +278,19 @@ const buildAudioGraph = (inputOffset: number, durations: number[], xfade: number
   }
 }
 
-export const startStream = async (opts: { backgrounds: { path: string; duration: number }[]; tracks: string[]; streamUrl: string }) => {
+export const startStream = async (opts: {
+  backgrounds: { path: string; duration: number }[]
+  tracks: string[]
+  streamUrls: string[]
+}) => {
   if (!opts.tracks.length) {
     return { ok: false, message: 'No tracks provided' }
   }
   if (!opts.backgrounds.length) {
     return { ok: false, message: 'No backgrounds provided' }
+  }
+  if (!opts.streamUrls.length) {
+    return { ok: false, message: 'No stream URLs provided' }
   }
 
   state.lastOpts = opts
@@ -394,10 +401,14 @@ const runStream = async (opts: StartOptions, preferXfade: boolean, attemptedFall
     '2',
     '-threads',
     '1',
-    '-f',
-    'flv',
-    opts.streamUrl,
   )
+
+  if (opts.streamUrls.length > 1) {
+    const teeArg = opts.streamUrls.map((url) => `[f=flv:onfail=ignore]${url}`).join('|')
+    args.push('-f', 'tee', teeArg)
+  } else {
+    args.push('-f', 'flv', opts.streamUrls[0])
+  }
 
   const proc = spawn(FFMPEG_BIN, args, { stdio: 'inherit' })
   state.process = proc
@@ -458,6 +469,7 @@ const runStream = async (opts: StartOptions, preferXfade: boolean, attemptedFall
       duration: totalDuration.toFixed(2),
       sanitizedTracks: preparedTracks.some((t) => t.sanitized),
       remuxedTracks: preparedTracks.some((t) => t.remuxed),
+      outputs: opts.streamUrls.length,
     }),
   )
 

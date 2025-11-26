@@ -42,6 +42,7 @@ export default buildConfig({
       await payload.db.drizzle.execute(
         sql`alter table "stream_data_backgrounds" add column if not exists "duration" numeric`,
       )
+      await payload.db.drizzle.execute(sql`alter table "stream_data" add column if not exists "youtube_key" text`)
     } catch (err) {
       payload.logger.warn({ err }, 'failed to ensure duration column')
     }

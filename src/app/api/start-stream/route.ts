@@ -15,6 +15,9 @@ const MEDIA_DIR = path.join(process.cwd(), 'media')
 const normalizeStreamUrl = (twitchKey: string) =>
   twitchKey.startsWith('rtmp://') ? twitchKey : `rtmp://live.twitch.tv/app/${twitchKey}`
 
+const normalizeYouTubeUrl = (youtubeKey: string) =>
+  youtubeKey.startsWith('rtmp://') ? youtubeKey : `rtmp://a.rtmp.youtube.com/live2/${youtubeKey}`
+
 const resolveMediaPath = (media: Media | number | null | undefined) => {
   if (!media || typeof media === 'number') return null
 
@@ -34,6 +37,7 @@ export async function POST() {
       await payload.db.drizzle.execute(
         sql`alter table "stream_data_backgrounds" add column if not exists "duration" numeric`,
       )
+      await payload.db.drizzle.execute(sql`alter table "stream_data" add column if not exists "youtube_key" text`)
     } catch (err) {
       console.warn('[stream] failed to ensure duration column; continuing', err)
     }
@@ -69,7 +73,18 @@ export async function POST() {
       )
     }
 
-    const streamUrl = normalizeStreamUrl(streamData.twitchKey)
+    const streamUrls: string[] = []
+    const youtubeKey = (streamData as { youtubeKey?: string } | undefined)?.youtubeKey
+    if (streamData.twitchKey) {
+      streamUrls.push(normalizeStreamUrl(streamData.twitchKey))
+    }
+    if (youtubeKey) {
+      streamUrls.push(normalizeYouTubeUrl(youtubeKey))
+    }
+
+    if (!streamUrls.length) {
+      return NextResponse.json({ message: 'No Twitch/YouTube key provided.' }, { status: 400 })
+    }
 
     if (isStreaming()) {
       stopStream()
@@ -77,7 +92,7 @@ export async function POST() {
 
     const result = await startStream({
       backgrounds,
-      streamUrl,
+      streamUrls,
       tracks,
     })
 
@@ -87,7 +102,7 @@ export async function POST() {
 
     return NextResponse.json({
       message: result.message,
-      streamUrl,
+      streamUrls,
       tracks: tracks.length,
       backgrounds: backgrounds.length,
     })

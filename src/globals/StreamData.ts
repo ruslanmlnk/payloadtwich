@@ -61,5 +61,11 @@ export const StreamData: GlobalConfig = {
       type: 'text',
       required: true,
     },
+    {
+      name: 'youtubeKey',
+      label: 'YouTube Key',
+      type: 'text',
+      required: false,
+    },
   ],
 }
